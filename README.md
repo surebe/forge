@@ -37,7 +37,10 @@ the scenario epoch, so identical request streams produce identical responses.
 ## Rebuilding
 
 ```sh
-CGO_ENABLED=0 go build -o forge .
+CGO_ENABLED=0 GOAMD64=v1 go build -trimpath -ldflags "-s -w" -o forge .
 ```
+
+The committed binary is built with these flags: static, generic x86-64
+baseline, stripped — about 6.8 MB.
 
 Requires Go 1.24+. No third-party dependencies.
