@@ -1,5 +1,11 @@
 # forge — a GitHub-compatible git forge
 
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/surebe/forge/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/surebe/forge/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+
+Built for the [make.fun `github-core-clone-01` bounty](https://make.fun/bounty/github-core-clone-01) — "Build a GitHub-compatible git forge", $500 in USDC.
+
 A single-process, in-memory implementation of the GitHub surfaces the
 `github-core-clone-01` bounty exercises, written from scratch in Go using only
 the standard library:
