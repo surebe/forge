@@ -8,15 +8,18 @@
 package main
 
 import (
+	"runtime"
 	"runtime/debug"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -24,7 +27,88 @@ import (
 
 var token string // MAKEFUN_SHOP_TOKEN: the bearer token every API call must carry
 
+// cpuProcs picks the GOMAXPROCS budget for this process. The trial host may
+// expose many CPUs while the container's CPU quota is far smaller; Go's
+// default (one P per visible CPU) then thrashes the scheduler under burst
+// load and steals cycles from everything else on the quota. Round-3 A/B
+// benches on a 1.5-CPU cell (interleaved, same kit runner): GOMAXPROCS=1 and
+// =2 both beat the =NumCPU default on perf total, p50 and the read workload;
+// =2 had the better clone median. So: match the cgroup quota when one is
+// readable (ceil, clamped to [1, NumCPU]); when no quota is readable, fall
+// back to 2 (or NumCPU when the machine is smaller than that).
+func cpuProcs() int {
+	ncpu := runtime.NumCPU()
+	if q, ok := cgroupCPUQuota(); ok {
+		p := int(math.Ceil(q))
+		if p < 1 {
+			p = 1
+		}
+		if p > ncpu {
+			p = ncpu
+		}
+		return p
+	}
+	if ncpu > 2 {
+		return 2
+	}
+	return ncpu
+}
+
+// cgroupCPUQuota returns the process's CPU quota in CPUs (quota/period)
+// from cgroup v2 (cpu.max) or v1 (cpu.cfs_quota_us/cpu.cfs_period_us),
+// looking at the hierarchy root and at the process's own cgroup path.
+// ok=false means no finite quota could be read (unset, "max", or absent).
+func cgroupCPUQuota() (float64, bool) {
+	// Candidate directories: the v2 root and the process's own v2 path.
+	v2dirs := []string{"/sys/fs/cgroup"}
+	v1dirs := []string{"/sys/fs/cgroup/cpu"}
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) != 3 || parts[2] == "/" || parts[2] == "" {
+				continue
+			}
+			if parts[1] == "" { // v2 line: "0::/path"
+				v2dirs = append(v2dirs, "/sys/fs/cgroup"+parts[2])
+			}
+			if strings.Contains(parts[1], "cpu") && !strings.Contains(parts[1], "cpuset") {
+				v1dirs = append(v1dirs, "/sys/fs/cgroup/cpu"+parts[2])
+			}
+		}
+	}
+	for _, d := range v2dirs {
+		b, err := os.ReadFile(d + "/cpu.max")
+		if err != nil {
+			continue
+		}
+		f := strings.Fields(string(b))
+		if len(f) == 2 && f[0] != "max" {
+			quota, e1 := strconv.ParseFloat(f[0], 64)
+			period, e2 := strconv.ParseFloat(f[1], 64)
+			if e1 == nil && e2 == nil && quota > 0 && period > 0 {
+				return quota / period, true
+			}
+		}
+	}
+	for _, d := range v1dirs {
+		qb, e1 := os.ReadFile(d + "/cpu.cfs_quota_us")
+		pb, e2 := os.ReadFile(d + "/cpu.cfs_period_us")
+		if e1 != nil || e2 != nil {
+			continue
+		}
+		quota, err1 := strconv.ParseFloat(strings.TrimSpace(string(qb)), 64)
+		period, err2 := strconv.ParseFloat(strings.TrimSpace(string(pb)), 64)
+		if err1 == nil && err2 == nil && quota > 0 && period > 0 {
+			return quota / period, true
+		}
+	}
+	return 0, false
+}
+
 func main() {
+	procs := cpuProcs()
+	runtime.GOMAXPROCS(procs)
+	fmt.Fprintf(os.Stderr, "[forge] GOMAXPROCS=%d (NumCPU=%d)\n", procs, runtime.NumCPU())
 	debug.SetGCPercent(400)
 	token = os.Getenv("MAKEFUN_SHOP_TOKEN")
 	s := newStore()
