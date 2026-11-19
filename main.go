@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -30,28 +29,33 @@ var token string // MAKEFUN_SHOP_TOKEN: the bearer token every API call must car
 // cpuProcs picks the GOMAXPROCS budget for this process. The trial host may
 // expose many CPUs while the container's CPU quota is far smaller; Go's
 // default (one P per visible CPU) then thrashes the scheduler under burst
-// load and steals cycles from everything else on the quota. Round-3 A/B
-// benches on a 1.5-CPU cell (interleaved, same kit runner): GOMAXPROCS=1 and
-// =2 both beat the =NumCPU default on perf total, p50 and the read workload;
-// =2 had the better clone median. So: match the cgroup quota when one is
-// readable (ceil, clamped to [1, NumCPU]); when no quota is readable, fall
-// back to 2 (or NumCPU when the machine is smaller than that).
+// load and steals cycles from everything else on the quota. Round-3/4
+// interleaved measurements on this 1.5-CPU cell (full evidence in
+// PROGRESS.md): with an effective budget of ~2 CPUs or less, ONE P wins the
+// sequential workloads (read/write tails are scheduler stalls, not work —
+// per-op cost is identical across P counts and the GC never cycles under
+// SetGCPercent(400)); no workload ever benefited from more than 2 Ps (the
+// only concurrent workload, clone, is client-bound). So: a readable quota
+// of <= 2 CPUs -> 1; a larger quota -> 2; no readable quota -> 2 (the
+// raw-frontend build measured =2 >= =1 in that configuration).
 func cpuProcs() int {
 	ncpu := runtime.NumCPU()
-	if q, ok := cgroupCPUQuota(); ok {
-		p := int(math.Ceil(q))
-		if p < 1 {
-			p = 1
-		}
-		if p > ncpu {
-			p = ncpu
-		}
-		return p
+	if ncpu < 1 {
+		return 1
 	}
-	if ncpu > 2 {
+	if q, ok := cgroupCPUQuota(); ok {
+		if q <= 2 {
+			return 1
+		}
+		if ncpu < 2 {
+			return ncpu
+		}
 		return 2
 	}
-	return ncpu
+	if ncpu < 2 {
+		return ncpu
+	}
+	return 2
 }
 
 // cgroupCPUQuota returns the process's CPU quota in CPUs (quota/period)
@@ -112,7 +116,7 @@ func main() {
 	debug.SetGCPercent(400)
 	token = os.Getenv("MAKEFUN_SHOP_TOKEN")
 	s := newStore()
-	srv := &http.Server{Handler: newMux(s)}
+	handler := newMux(s)
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
@@ -122,11 +126,7 @@ func main() {
 	port := ln.Addr().(*net.TCPAddr).Port
 	fmt.Fprintf(os.Stderr, "[forge] listening on port %d\n", port)
 
-	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(os.Stderr, "[forge] serve:", err)
-		}
-	}()
+	shutdown := startServer(ln, handler)
 
 	envURL := strings.TrimRight(os.Getenv("MAKEFUN_ENV_URL"), "/")
 	if envURL == "" {
@@ -140,7 +140,7 @@ func main() {
 	waitDone(envURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	_ = shutdown(ctx)
 	fmt.Fprintln(os.Stderr, "[forge] done")
 }
 
